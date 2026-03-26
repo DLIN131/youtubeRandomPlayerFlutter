@@ -37,5 +37,15 @@ class PlaylistVideo {
       position: (json['position'] as num? ?? 0).toInt(),
     );
   }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'videoId': videoId,
+      'title': title,
+      'thumbnailUrl': thumbnailUrl,
+      'position': position,
+    };
+  }
 }
 

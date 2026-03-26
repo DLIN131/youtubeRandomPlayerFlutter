@@ -7,6 +7,7 @@ import 'models/playlist_video.dart';
 import 'services/audio_player_service.dart';
 import 'services/auth_service.dart';
 import 'services/backend_api_service.dart';
+import 'services/local_storage_service.dart';
 import 'services/youtube_api_service.dart';
 import 'utils/playlist_parser.dart';
 
@@ -37,7 +38,7 @@ class PlayerHomePage extends StatefulWidget {
   State<PlayerHomePage> createState() => _PlayerHomePageState();
 }
 
-class _PlayerHomePageState extends State<PlayerHomePage> {
+class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObserver {
   final TextEditingController _playlistInputController =
       TextEditingController();
   final TextEditingController _searchController = TextEditingController();
@@ -46,6 +47,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> {
   final BackendApiService _backendApiService = BackendApiService();
   final AuthService _authService = AuthService();
   final AudioPlayerService _audioPlayer = AudioPlayerService();
+  final LocalStorageService _localStorage = LocalStorageService();
 
   final List<PlaylistVideo> _allVideos = <PlaylistVideo>[];
   final List<PlaylistVideo> _visibleVideos = <PlaylistVideo>[];
@@ -65,7 +67,9 @@ class _PlayerHomePageState extends State<PlayerHomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initAuth();
+    _loadLocalPlaylist();
     _audioPlayer.player.playingStream.listen((playing) {
       if (mounted) setState(() => _isPlaying = playing);
     });
@@ -92,6 +96,23 @@ class _PlayerHomePageState extends State<PlayerHomePage> {
     });
   }
 
+  Future<void> _loadLocalPlaylist() async {
+    final data = await _localStorage.loadCurrentPlaylist();
+    if (data != null) {
+      final List<PlaylistVideo> videos = data['videos'] as List<PlaylistVideo>;
+      final String title = data['title'] as String;
+      if (videos.isNotEmpty) {
+        setState(() {
+          _allVideos.addAll(videos);
+          _visibleVideos.addAll(videos);
+          _playlistTitle = title;
+          _currentIndex = 0;
+          _isShuffleMode = false;
+        });
+      }
+    }
+  }
+
   Future<void> _loadDrawerData() async {
     if (!_authService.isLoggedIn) return;
 
@@ -110,10 +131,19 @@ class _PlayerHomePageState extends State<PlayerHomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _playlistInputController.dispose();
     _searchController.dispose();
     _audioPlayer.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      _audioPlayer.pause();
+      _audioPlayer.dispose();
+    }
   }
 
   Future<void> _fetchPlaylistSource(String text) async {
@@ -186,6 +216,8 @@ class _PlayerHomePageState extends State<PlayerHomePage> {
       _isShuffleMode = false;
       _isLoadingPlaylist = false;
     });
+
+    _localStorage.saveCurrentPlaylist(videos, title);
 
     _playCurrent();
   }

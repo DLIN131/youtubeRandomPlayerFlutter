@@ -1,4 +1,3 @@
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
@@ -13,17 +12,8 @@ class AudioPlayerService {
   static const String _fallbackAudioBaseUrl =
       'https://ytdl-server-byvu.onrender.com/download';
   static const bool _enableBackendFallback = true;
-  static const int _maxDirectCandidatesPerClientSet = 3;
-  static const Duration _backendProbeTimeout = Duration(seconds: 1);
-  static const Duration _setSourceTimeout = Duration(seconds: 5);
+  static const Duration _setSourceTimeout = Duration(seconds: 15);
   static const Duration _rateLimitCooldown = Duration(minutes: 20);
-  static const Map<String, String> _youtubeHeaders = {
-    'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    'Referer': 'https://www.youtube.com/',
-    'Origin': 'https://www.youtube.com',
-    'Accept': '*/*',
-  };
 
   final AudioPlayer player = AudioPlayer();
   final YoutubeExplode _yt = YoutubeExplode();
@@ -97,54 +87,37 @@ class AudioPlayerService {
   }
 
   Future<bool> _tryPlayDirect(PlaylistVideo video, MediaItem mediaItem) async {
-    Object? lastError;
-    final triedUrls = <String>{};
-
-    // Stage 1: fast path. Stage 2: recovery path if stage 1 failed.
-    final clientSets = <List<YoutubeApiClient>>[
-      [YoutubeApiClient.ios, YoutubeApiClient.android],
-      [YoutubeApiClient.androidVr],
-      [YoutubeApiClient.android],
-      [YoutubeApiClient.tv, YoutubeApiClient.ios],
+    // These clients return pre-signed stream URLs that can be played
+    // without special cookies/tokens - unlike the default web client.
+    // tv and androidVr are the most reliable for direct playback.
+    final clientsToTry = <YoutubeApiClient>[
+      YoutubeApiClient.tv,
+      YoutubeApiClient.androidVr,
+      YoutubeApiClient.ios,
     ];
 
-    for (final clients in clientSets) {
+    for (final client in clientsToTry) {
       try {
         final manifest = await _yt.videos.streams.getManifest(
           video.videoId,
-          ytClients: clients,
+          ytClients: [client],
         );
-
         final audioStreams = manifest.audioOnly.toList()
           ..sort((a, b) =>
               b.bitrate.bitsPerSecond.compareTo(a.bitrate.bitsPerSecond));
 
-        var picked = 0;
-        for (final stream in audioStreams) {
-          final url = stream.url.toString();
-          if (!triedUrls.add(url)) continue;
-          if (picked >= _maxDirectCandidatesPerClientSet) break;
-          picked++;
+        if (audioStreams.isEmpty) continue;
 
-          try {
-            await _setAndPlaySource(
-              url: url,
-              tag: mediaItem,
-              headers: _youtubeHeaders,
-            );
-            debugPrint(
-              'Direct playback succeeded for ${video.videoId} '
-              '(itag=${stream.tag}, bitrate=${stream.bitrate.bitsPerSecond}).',
-            );
-            return true;
-          } catch (e) {
-            lastError = e;
-            debugPrint(
-              'Direct candidate failed for ${video.videoId} '
-              '(itag=${stream.tag}, bitrate=${stream.bitrate.bitsPerSecond}): $e',
-            );
-          }
-        }
+        final stream = audioStreams.first;
+        final url = stream.url.toString();
+
+        await _setAndPlaySource(url: url, tag: mediaItem);
+        debugPrint(
+          'Direct playback succeeded for ${video.videoId} '
+          'using client ${client.runtimeType} '
+          '(itag=${stream.tag}, bitrate=${stream.bitrate.bitsPerSecond}).',
+        );
+        return true;
       } on RequestLimitExceededException catch (e) {
         _rateLimitedUntil = DateTime.now().add(_rateLimitCooldown);
         debugPrint(
@@ -153,27 +126,18 @@ class AudioPlayerService {
         );
         throw RateLimitedPlaybackException(_rateLimitCooldown);
       } catch (e) {
-        lastError = e;
         debugPrint(
-            'Manifest fetch failed for ${video.videoId} with current client set: $e');
+            'Client ${client.runtimeType} failed for ${video.videoId}: $e');
       }
     }
 
-    if (lastError != null) {
-      debugPrint(
-          'All direct playback attempts failed for ${video.videoId}: $lastError');
-    }
+    debugPrint('All direct clients failed for ${video.videoId}.');
     return false;
   }
 
   Future<bool> _tryPlayBackend(PlaylistVideo video, MediaItem mediaItem) async {
     final url = '$_fallbackAudioBaseUrl/${video.videoId}';
-    final backendAvailable = await _probeUrl(url);
-    if (!backendAvailable) {
-      debugPrint('Skip backend fallback because endpoint probe failed: $url');
-      return false;
-    }
-
+    // Skip probe; just attempt to play. The _setSourceTimeout will catch failures.
     try {
       await _setAndPlaySource(url: url, tag: mediaItem);
       debugPrint('Backend playback succeeded for ${video.videoId}.');
@@ -198,38 +162,6 @@ class AudioPlayerService {
     );
     await player.setAudioSource(source).timeout(_setSourceTimeout);
     await player.play();
-  }
-
-  Future<bool> _probeUrl(String url) async {
-    final uri = Uri.parse(url);
-    final client = HttpClient()..connectionTimeout = _backendProbeTimeout;
-
-    try {
-      final headRequest = await client.headUrl(uri);
-      final headResponse =
-          await headRequest.close().timeout(_backendProbeTimeout);
-      final headStatus = headResponse.statusCode;
-      await headResponse.drain();
-      if (headStatus >= 200 && headStatus < 400) {
-        return true;
-      }
-      if (headStatus != HttpStatus.methodNotAllowed) {
-        return false;
-      }
-
-      final getRequest = await client.getUrl(uri);
-      getRequest.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
-      final getResponse =
-          await getRequest.close().timeout(_backendProbeTimeout);
-      final getStatus = getResponse.statusCode;
-      await getResponse.drain();
-      return getStatus >= 200 && getStatus < 400;
-    } catch (e) {
-      debugPrint('Backend probe exception for $url: $e');
-      return false;
-    } finally {
-      client.close(force: true);
-    }
   }
 }
 
