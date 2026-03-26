@@ -63,6 +63,8 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
   bool _isPlaying = false;
   bool _isInit = false;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
 
   @override
   void initState() {
@@ -73,11 +75,11 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     _audioPlayer.player.playingStream.listen((playing) {
       if (mounted) setState(() => _isPlaying = playing);
     });
-    _audioPlayer.player.currentIndexStream.listen((index) {
-      // just_audio handles its own index if we use a concatenating audio source,
-      // but here we are loading one by one, so we manage our own _currentIndex.
-      // However, to support background next/prev we might need concatenating audio source.
-      // For simplicity, we just listen to player completion here.
+    _audioPlayer.player.positionStream.listen((pos) {
+      if (mounted) setState(() => _position = pos);
+    });
+    _audioPlayer.player.durationStream.listen((dur) {
+      if (mounted) setState(() => _duration = dur ?? Duration.zero);
     });
     _audioPlayer.player.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
@@ -394,75 +396,8 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                     style: const TextStyle(color: Colors.red),
                   ),
                 ),
-              const SizedBox(height: 8),
 
-              // Audio Player UI completely replacing the YoutubePlayerIFrame
-              if (currentVideo != null)
-                Card(
-                    elevation: 6,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
-                            child: currentVideo.thumbnailUrl.isEmpty
-                                ? const Icon(Icons.music_note, size: 80)
-                                : Image.network(
-                                    currentVideo.thumbnailUrl,
-                                    height: 180,
-                                    width: double.infinity,
-                                    fit: BoxFit.cover,
-                                  ),
-                          ),
-                          const SizedBox(height: 16),
-                          Text(
-                            currentVideo.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                                fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 16),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: <Widget>[
-                              IconButton(
-                                onPressed: _playPrevious,
-                                iconSize: 42,
-                                icon: const Icon(Icons.skip_previous),
-                              ),
-                              const SizedBox(width: 16),
-                              IconButton(
-                                onPressed: () {
-                                  if (_isPlaying) {
-                                    _audioPlayer.pause();
-                                  } else {
-                                    _audioPlayer.resume();
-                                  }
-                                },
-                                iconSize: 64,
-                                icon: Icon(_isPlaying
-                                    ? Icons.pause_circle_filled
-                                    : Icons.play_circle_fill),
-                                color: Theme.of(context).colorScheme.primary,
-                              ),
-                              const SizedBox(width: 16),
-                              IconButton(
-                                onPressed: _playNext,
-                                iconSize: 42,
-                                icon: const Icon(Icons.skip_next),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    )),
-
-              const SizedBox(height: 8),
+              // Playlist list — takes all available space
               Expanded(
                 child: _visibleVideos.isEmpty
                     ? const Center(child: Text('Playlist not loaded yet'))
@@ -505,12 +440,154 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                         },
                       ),
               ),
+
+              // Compact mini-player at the bottom
+              if (currentVideo != null) _buildMiniPlayer(context, currentVideo),
             ],
           ),
         ),
       ),
     );
   }
+
+  String _formatDuration(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  Widget _buildMiniPlayer(BuildContext context, PlaylistVideo video) {
+    final totalSeconds = _duration.inSeconds.toDouble();
+    final currentSeconds = _position.inSeconds
+        .toDouble()
+        .clamp(0.0, totalSeconds > 0 ? totalSeconds : 1.0);
+
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 8,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Thumbnail + title row
+            Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: video.thumbnailUrl.isEmpty
+                      ? const Icon(Icons.music_note, size: 40)
+                      : Image.network(
+                          video.thumbnailUrl,
+                          width: 48,
+                          height: 48,
+                          fit: BoxFit.cover,
+                        ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    video.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            // Seek slider + time labels
+            Row(
+              children: [
+                Text(_formatDuration(_position),
+                    style: const TextStyle(fontSize: 11)),
+                Expanded(
+                  child: SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 3,
+                      thumbShape:
+                          const RoundSliderThumbShape(enabledThumbRadius: 6),
+                      overlayShape:
+                          const RoundSliderOverlayShape(overlayRadius: 12),
+                    ),
+                    child: Slider(
+                      min: 0,
+                      max: totalSeconds > 0 ? totalSeconds : 1,
+                      value: currentSeconds,
+                      onChanged: totalSeconds > 0
+                          ? (v) {
+                              _audioPlayer.player
+                                  .seek(Duration(seconds: v.toInt()));
+                            }
+                          : null,
+                    ),
+                  ),
+                ),
+                Text(_formatDuration(_duration),
+                    style: const TextStyle(fontSize: 11)),
+              ],
+            ),
+            // Controls row: |◀  ⏪10  ⏸  10⏩  ▶|
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  onPressed: _playPrevious,
+                  iconSize: 28,
+                  icon: const Icon(Icons.skip_previous),
+                ),
+                IconButton(
+                  onPressed: () => _audioPlayer.player
+                      .seek(_position - const Duration(seconds: 10) <
+                              Duration.zero
+                          ? Duration.zero
+                          : _position - const Duration(seconds: 10)),
+                  iconSize: 26,
+                  tooltip: '-10s',
+                  icon: const Icon(Icons.replay_10),
+                ),
+                IconButton(
+                  onPressed: () {
+                    if (_isPlaying) {
+                      _audioPlayer.pause();
+                    } else {
+                      _audioPlayer.resume();
+                    }
+                  },
+                  iconSize: 48,
+                  icon: Icon(_isPlaying
+                      ? Icons.pause_circle_filled
+                      : Icons.play_circle_fill),
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                IconButton(
+                  onPressed: () {
+                    final next = _position + const Duration(seconds: 10);
+                    if (_duration > Duration.zero && next < _duration) {
+                      _audioPlayer.player.seek(next);
+                    }
+                  },
+                  iconSize: 26,
+                  tooltip: '+10s',
+                  icon: const Icon(Icons.forward_10),
+                ),
+                IconButton(
+                  onPressed: _playNext,
+                  iconSize: 28,
+                  icon: const Icon(Icons.skip_next),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
 
   Widget _buildDrawer() {
     return Drawer(
