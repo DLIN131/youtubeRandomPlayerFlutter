@@ -19,6 +19,7 @@ class AudioPlayerService {
   final YoutubeExplode _yt = YoutubeExplode();
   DateTime? _rateLimitedUntil;
   int _fetchSessionId = 0;
+  final Map<String, _CachedUrl> _urlCache = {};
 
   MediaItem _createMediaItem(PlaylistVideo video) {
     return MediaItem(
@@ -54,7 +55,8 @@ class AudioPlayerService {
       ],
     );
 
-    await player.stop();
+    // player.setAudioSource replaces active media natively and instantly 
+    // without the overhead of an explicit stop() via method channels.
     await player.setAudioSource(_activePlaylist!);
     player.play(); // DO NOT AWAIT to unblock the caller
   }
@@ -104,8 +106,20 @@ class AudioPlayerService {
   }
 
   Future<String?> _resolveStreamUrl(PlaylistVideo video) async {
+    // 1. Check ultra-fast memory cache
+    if (_urlCache.containsKey(video.videoId)) {
+      final cached = _urlCache[video.videoId]!;
+      if (DateTime.now().isBefore(cached.expiresAt)) {
+        debugPrint('Cache hit for ${video.videoId} - almost 0ms load time!');
+        return cached.url;
+      } else {
+        _urlCache.remove(video.videoId);
+      }
+    }
+
+    // 2. Resolve fresh if not cached
     final clientsToTry = <YoutubeApiClient>[
-      YoutubeApiClient.tv,
+      YoutubeApiClient.tv,        // TV client is consistently the fastest non-HTML parser
       YoutubeApiClient.androidVr,
       YoutubeApiClient.ios,
     ];
@@ -122,8 +136,21 @@ class AudioPlayerService {
 
         if (audioStreams.isNotEmpty) {
           final stream = audioStreams.first;
+          final url = stream.url.toString();
           debugPrint('Resolved stream using ${client.runtimeType} for ${video.videoId}');
-          return stream.url.toString();
+          
+          // YT URLs usually contain an 'expire' query param (timestamp in seconds)
+          final uri = Uri.parse(url);
+          final expireStr = uri.queryParameters['expire'];
+          if (expireStr != null) {
+            final expireSeconds = int.tryParse(expireStr);
+            if (expireSeconds != null) {
+              final expireDate = DateTime.fromMillisecondsSinceEpoch(expireSeconds * 1000);
+              // Store it with a 10 min safety buffer
+              _urlCache[video.videoId] = _CachedUrl(url, expireDate.subtract(const Duration(minutes: 10)));
+            }
+          }
+          return url;
         }
       } on RequestLimitExceededException {
         _rateLimitedUntil = DateTime.now().add(_rateLimitCooldown);
@@ -141,6 +168,12 @@ class AudioPlayerService {
 
     return null;
   }
+}
+
+class _CachedUrl {
+  final String url;
+  final DateTime expiresAt;
+  _CachedUrl(this.url, this.expiresAt);
 }
 
 class RateLimitedPlaybackException implements Exception {
