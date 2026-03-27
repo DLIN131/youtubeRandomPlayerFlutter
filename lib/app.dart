@@ -42,6 +42,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   final TextEditingController _playlistInputController =
       TextEditingController();
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
 
   final YoutubeApiService _youtubeApiService = YoutubeApiService();
   final BackendApiService _backendApiService = BackendApiService();
@@ -62,7 +63,6 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   bool _isShuffleMode = false;
   bool _isSearchExpanded = false;
   String _playlistTitle = '';
-  String _errorMessage = '';
 
   bool _isPlaying = false;
   bool _isInit = false;
@@ -163,6 +163,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     WidgetsBinding.instance.removeObserver(this);
     _playlistInputController.dispose();
     _searchController.dispose();
+    _scrollController.dispose();
     _audioPlayer.dispose();
     super.dispose();
   }
@@ -178,13 +179,16 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   Future<void> _fetchPlaylistSource(String text) async {
     final playlistId = parsePlaylistId(text);
     if (playlistId.isEmpty) {
-      setState(() => _errorMessage = 'Invalid Playlist ID');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid Playlist ID'), duration: Duration(seconds: 2))
+        );
+      }
       return;
     }
 
     setState(() {
       _isLoadingPlaylist = true;
-      _errorMessage = '';
     });
 
     try {
@@ -194,8 +198,16 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     } catch (e) {
       setState(() {
         _isLoadingPlaylist = false;
-        _errorMessage = 'Failed to load: $e';
       });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Load failed: $e'),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 
@@ -205,7 +217,6 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
     setState(() {
       _isLoadingPlaylist = true;
-      _errorMessage = '';
     });
 
     try {
@@ -215,8 +226,16 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     } catch (e) {
       setState(() {
         _isLoadingPlaylist = false;
-        _errorMessage = 'Failed to load saved playlist: $e';
       });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Load failed: $e'),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 
@@ -226,7 +245,6 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
     setState(() {
       _isLoadingPlaylist = true;
-      _errorMessage = '';
     });
 
     try {
@@ -236,8 +254,16 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     } catch (e) {
       setState(() {
         _isLoadingPlaylist = false;
-        _errorMessage = 'Failed to load liked videos: $e';
       });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Load failed: $e'),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 
@@ -245,12 +271,16 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     if (videos.isEmpty) {
       setState(() {
         _isLoadingPlaylist = false;
-        _errorMessage = 'No playable videos found';
         _playlistTitle = title;
         _allVideos.clear();
         _visibleVideos.clear();
         _currentIndex = -1;
       });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No playable videos found'), duration: Duration(seconds: 2))
+        );
+      }
       return;
     }
 
@@ -284,10 +314,26 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   void _playVideoObject(PlaylistVideo video) {
     if (_isChangingTrack) return;
     _isChangingTrack = true;
+    
+    // If the video being played is NOT in the current filtered view (search result),
+    // we should automatically clear the search so the playlist can jump to its real position.
+    if (!_visibleVideos.contains(video)) {
+      _searchController.clear();
+      _isSearchExpanded = false; // Collapse the search bar
+      _visibleVideos.clear();
+      _visibleVideos.addAll(_isShuffleMode ? _playbackQueue : _allVideos);
+    }
+
     setState(() {
       _playingVideo = video;
       _currentIndex = _visibleVideos.indexOf(video);
     });
+
+    // Auto-scroll whenever we manually start a new video
+    if (mounted && _currentIndex != -1) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPlaying());
+    }
+
     _audioPlayer.playVideoAsCurrent(video).then((_) {
       _isChangingTrack = false;
       // Pre-queue the NEXT track for gapless background playback based on _playbackQueue
@@ -384,9 +430,14 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
     setState(() {
       if (normalized.isEmpty) {
-        _visibleVideos
-          ..clear()
-          ..addAll(_allVideos);
+        _visibleVideos.clear();
+        // If shuffle is on, we should show the shuffled playbackQueue order,
+        // otherwise show the original allVideos order.
+        if (_isShuffleMode) {
+          _visibleVideos.addAll(_playbackQueue);
+        } else {
+          _visibleVideos.addAll(_allVideos);
+        }
       } else {
         _visibleVideos
           ..clear()
@@ -408,6 +459,30 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
         }
       }
     });
+
+    // If clearing search, auto-scroll to the playing song
+    if (normalized.isEmpty && _playingVideo != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPlaying());
+    }
+  }
+
+  void _scrollToPlaying() {
+    if (_currentIndex < 0 || !_scrollController.hasClients) return;
+    
+    // Exact height defined via itemExtent: 85.0
+    const double itemHeight = 85.0; 
+    final double viewportHeight = _scrollController.position.viewportDimension;
+    final double targetOffset = (_currentIndex * itemHeight) - (viewportHeight / 2) + (itemHeight / 2);
+    
+    // Avoid double animation or if already near Target
+    final current = _scrollController.offset;
+    if ((current - targetOffset).abs() < 10) return;
+
+    _scrollController.animateTo(
+      targetOffset.clamp(0.0, _scrollController.position.maxScrollExtent),
+      duration: const Duration(milliseconds: 600),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   @override
@@ -494,20 +569,14 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-              if (_errorMessage.isNotEmpty)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    _errorMessage,
-                    style: const TextStyle(color: Colors.red),
-                  ),
-                ),
 
               // Playlist list — takes all available space
               Expanded(
                 child: _visibleVideos.isEmpty
                     ? const Center(child: Text('Playlist not loaded yet'))
                     : ListView.builder(
+                        controller: _scrollController,
+                        itemExtent: 85.0, // Critical for performance with large lists (2000+)
                         itemCount: _visibleVideos.length,
                         itemBuilder: (BuildContext context, int index) {
                           final item = _visibleVideos[index];
