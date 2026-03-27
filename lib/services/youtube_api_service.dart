@@ -12,9 +12,13 @@ class YoutubeApiService {
 
   final Dio _dio = Dio(BaseOptions(baseUrl: _baseUrl));
 
-  Future<List<PlaylistVideo>> fetchPlaylistItems(String playlistId) async {
+  Future<List<PlaylistVideo>> fetchPlaylistItems(String playlistId, {String? oauthToken}) async {
     final List<PlaylistVideo> videos = [];
     String? pageToken;
+    
+    final options = oauthToken != null 
+      ? Options(headers: {'Authorization': 'Bearer $oauthToken'})
+      : null;
 
     do {
       final response = await _dio.get<Map<String, dynamic>>(
@@ -23,9 +27,10 @@ class YoutubeApiService {
           'part': 'snippet,contentDetails,status,id',
           'playlistId': playlistId,
           'maxResults': 50,
-          'key': _apiKey,
+          if (oauthToken == null) 'key': _apiKey,
           if (pageToken != null) 'pageToken': pageToken,
         },
+        options: options,
       );
 
       final data = response.data ?? <String, dynamic>{};

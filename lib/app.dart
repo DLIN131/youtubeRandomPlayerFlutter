@@ -220,6 +220,27 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     }
   }
 
+  Future<void> _fetchLikedVideos() async {
+    final token = _authService.oauthToken;
+    if (token == null || token.isEmpty) return;
+
+    setState(() {
+      _isLoadingPlaylist = true;
+      _errorMessage = '';
+    });
+
+    try {
+      final videos =
+          await _youtubeApiService.fetchPlaylistItems('LL', oauthToken: token);
+      _setPlaylistData(videos, 'Liked Videos');
+    } catch (e) {
+      setState(() {
+        _isLoadingPlaylist = false;
+        _errorMessage = 'Failed to load liked videos: $e';
+      });
+    }
+  }
+
   void _setPlaylistData(List<PlaylistVideo> videos, String title) {
     if (videos.isEmpty) {
       setState(() {
@@ -743,6 +764,14 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
               },
             )
           else ...[
+            ListTile(
+              leading: const Icon(Icons.thumb_up),
+              title: const Text('Liked Videos'),
+              onTap: () {
+                Navigator.pop(context);
+                _fetchLikedVideos();
+              },
+            ),
             ExpansionTile(
               leading: const Icon(Icons.save),
               title: const Text('Saved Playlists'),
