@@ -9,7 +9,6 @@ class AuthService {
   
   final Dio _dio = Dio(BaseOptions(baseUrl: _baseUrl));
   final GoogleSignIn _googleSignIn = GoogleSignIn(
-    clientId: '959560237311-13dbj26mjffjcph7r49pq3c57lbvpgrr.apps.googleusercontent.com',
     serverClientId: '959560237311-13dbj26mjffjcph7r49pq3c57lbvpgrr.apps.googleusercontent.com',
     scopes: [
       'profile',

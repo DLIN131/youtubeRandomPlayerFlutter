@@ -58,6 +58,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   int _currentIndex = -1;
   bool _isLoadingPlaylist = false;
   bool _isShuffleMode = false;
+  bool _isSearchExpanded = false;
   String _playlistTitle = '';
   String _errorMessage = '';
 
@@ -345,7 +346,31 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Youtube Random Player'),
+        title: _isSearchExpanded
+            ? TextField(
+                controller: _searchController,
+                onChanged: _search,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: 'Search video title...',
+                  border: InputBorder.none,
+                ),
+              )
+            : const Text('Youtube Random Player'),
+        actions: [
+          IconButton(
+            icon: Icon(_isSearchExpanded ? Icons.close : Icons.search),
+            onPressed: () {
+              setState(() {
+                _isSearchExpanded = !_isSearchExpanded;
+                if (!_isSearchExpanded) {
+                  _searchController.clear();
+                  _search(''); // Reset search
+                }
+              });
+            },
+          ),
+        ],
         elevation: 4,
       ),
       drawer: _buildDrawer(),
@@ -358,7 +383,15 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                 controller: _playlistInputController,
                 decoration: InputDecoration(
                   hintText: 'Paste playlist URL or ID',
-                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide.none,
+                  ),
+                  filled: true,
+                  fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
                   suffixIcon: _isLoadingPlaylist
                       ? const Padding(
                           padding: EdgeInsets.all(12),
@@ -376,30 +409,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                 ),
                 onSubmitted: (val) => _fetchPlaylistSource(val),
               ),
-              const SizedBox(height: 8),
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: _search,
-                      decoration: const InputDecoration(
-                        hintText: 'Search video title',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.search),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton.icon(
-                    onPressed: _toggleShuffle,
-                    icon:
-                        Icon(_isShuffleMode ? Icons.shuffle_on : Icons.shuffle),
-                    label: const Text('Random'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
               if (_playlistTitle.isNotEmpty)
                 Align(
                   alignment: Alignment.centerLeft,
@@ -556,6 +566,15 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 IconButton(
+                  onPressed: _toggleShuffle,
+                  iconSize: 26,
+                  color: _isShuffleMode
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                  icon: const Icon(Icons.shuffle),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
                   onPressed: _playPrevious,
                   iconSize: 28,
                   icon: const Icon(Icons.skip_previous),
@@ -600,6 +619,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                   iconSize: 28,
                   icon: const Icon(Icons.skip_next),
                 ),
+                const SizedBox(width: 34), // Visually balance the shuffle button
               ],
             ),
           ],
