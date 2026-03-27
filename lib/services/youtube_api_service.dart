@@ -114,5 +114,85 @@ class YoutubeApiService {
 
     return playlists;
   }
+
+  Future<List<PlaylistVideo>> searchVideos(String query) async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/search',
+      queryParameters: {
+        'part': 'snippet',
+        'q': query,
+        'type': 'video',
+        'maxResults': 25,
+        'key': _apiKey,
+      },
+    );
+
+    final data = response.data ?? <String, dynamic>{};
+    final items = (data['items'] as List<dynamic>? ?? <dynamic>[])
+        .whereType<Map<String, dynamic>>();
+
+    final List<PlaylistVideo> results = [];
+    for (int i = 0; i < items.length; i++) {
+      final item = items.elementAt(i);
+      final snippet = item['snippet'] as Map<String, dynamic>? ?? {};
+      final videoId = (item['id']?['videoId'] ?? '').toString();
+      if (videoId.isEmpty) continue;
+
+      results.add(PlaylistVideo(
+        id: videoId,
+        videoId: videoId,
+        title: (snippet['title'] ?? '').toString(),
+        thumbnailUrl: (snippet['thumbnails']?['medium']?['url'] ?? 
+                       snippet['thumbnails']?['default']?['url'] ?? '').toString(),
+        position: i,
+      ));
+    }
+    return results;
+  }
+
+  Future<bool> checkVideoInPlaylist(String playlistId, String videoId, String oauthToken) async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/playlistItems',
+      queryParameters: {
+        'part': 'id',
+        'playlistId': playlistId,
+        'videoId': videoId,
+        'maxResults': 1,
+      },
+      options: Options(
+        headers: {
+          'Authorization': 'Bearer $oauthToken',
+        },
+      ),
+    );
+
+    final data = response.data ?? <String, dynamic>{};
+    final items = data['items'] as List<dynamic>?;
+    return items != null && items.isNotEmpty;
+  }
+
+  Future<void> addVideoToPlaylist(String playlistId, String videoId, String oauthToken) async {
+    await _dio.post(
+      '/playlistItems',
+      queryParameters: {
+        'part': 'snippet',
+      },
+      options: Options(
+        headers: {
+          'Authorization': 'Bearer $oauthToken',
+          'Content-Type': 'application/json',
+        },
+      ),
+      data: {
+        'snippet': {
+          'playlistId': playlistId,
+          'resourceId': {
+            'kind': 'youtube#video',
+            'videoId': videoId,
+          },
+        },
+      },
+    );
+  }
 }
 

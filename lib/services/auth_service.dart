@@ -13,7 +13,7 @@ class AuthService {
     scopes: [
       'profile',
       'email',
-      'https://www.googleapis.com/auth/youtube.readonly',
+      'https://www.googleapis.com/auth/youtube',
     ],
   );
 

@@ -63,6 +63,9 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   bool _isShuffleMode = false;
   bool _isSearchExpanded = false;
   String _playlistTitle = '';
+  final List<PlaylistVideo> _globalSearchResults = <PlaylistVideo>[];
+  bool _isGlobalSearch = false;
+  bool _isGlobalSearching = false;
 
   bool _isPlaying = false;
   bool _isInit = false;
@@ -339,8 +342,10 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       // Pre-queue the NEXT track for gapless background playback based on _playbackQueue
       if (_playbackQueue.isNotEmpty) {
         final qIndex = _playbackQueue.indexOf(video);
-        final nextIndex = (qIndex + 1) % _playbackQueue.length;
-        _audioPlayer.enqueueNext(_playbackQueue[nextIndex]);
+        if (qIndex != -1) {
+           final nextIndex = (qIndex + 1) % _playbackQueue.length;
+           _audioPlayer.enqueueNext(_playbackQueue[nextIndex]);
+        }
       }
     }).catchError((e) {
       _isChangingTrack = false;
@@ -466,6 +471,114 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     }
   }
 
+  Future<void> _searchGlobal(String keyword) async {
+    final normalized = keyword.trim();
+    if (normalized.isEmpty) {
+      setState(() {
+        _globalSearchResults.clear();
+        _isGlobalSearching = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isGlobalSearching = true;
+    });
+
+    try {
+      final results = await _youtubeApiService.searchVideos(normalized);
+      setState(() {
+        _globalSearchResults.clear();
+        _globalSearchResults.addAll(results);
+        _isGlobalSearching = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isGlobalSearching = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Search failed: $e'), duration: const Duration(seconds: 2))
+        );
+      }
+    }
+  }
+
+  Future<void> _onAddToYouTube(PlaylistVideo video) async {
+    if (!_authService.isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please login to add to YouTube'), duration: Duration(seconds: 2))
+      );
+      return;
+    }
+
+    final targetPlaylist = await _showPlaylistSelectionDialog();
+    if (targetPlaylist == null) return;
+
+    final token = _authService.oauthToken;
+    if (token == null) return;
+
+    try {
+      // Check for duplicates first (Efficiently via videoId filter)
+      final exists = await _youtubeApiService.checkVideoInPlaylist(
+          targetPlaylist['value'], video.videoId, token);
+      if (exists) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content: Text('"${video.title}" is already in this playlist.'),
+                duration: const Duration(seconds: 2)),
+          );
+        }
+        return;
+      }
+
+      await _youtubeApiService.addVideoToPlaylist(
+          targetPlaylist['value'], video.videoId, token);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Added to ${targetPlaylist['name']}!'), duration: const Duration(seconds: 2))
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to add: $e'), duration: const Duration(seconds: 2))
+        );
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>?> _showPlaylistSelectionDialog() async {
+    return showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Select YouTube Playlist'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: _myYtPlaylists.isEmpty
+                ? const Text('No YouTube playlists found.')
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _myYtPlaylists.length,
+                    itemBuilder: (context, index) {
+                      final plist = _myYtPlaylists[index];
+                      return ListTile(
+                        title: Text(plist['name'] ?? ''),
+                        onTap: () => Navigator.pop(context, plist),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ],
+        );
+      },
+    );
+  }
+
   void _scrollToPlaying() {
     if (_currentIndex < 0 || !_scrollController.hasClients) return;
     
@@ -485,6 +598,15 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     );
   }
 
+  Future<void> _playPreview(PlaylistVideo video) async {
+    setState(() {
+      _playingVideo = video;
+      _currentIndex = -1; // Not in local list
+    });
+    // Just play it as a one-off
+    await _audioPlayer.playVideoAsCurrent(video);
+  }
+
   @override
   Widget build(BuildContext context) {
     // Determine which video to show in the Mini-Player.
@@ -500,11 +622,33 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
         title: _isSearchExpanded
             ? TextField(
                 controller: _searchController,
-                onChanged: _search,
                 autofocus: true,
-                decoration: const InputDecoration(
-                  hintText: 'Search video title...',
+                onChanged: (val) {
+                  if (!_isGlobalSearch) _search(val);
+                },
+                onSubmitted: (val) {
+                  if (_isGlobalSearch) _searchGlobal(val);
+                },
+                decoration: InputDecoration(
+                  hintText: _isGlobalSearch ? 'Search YouTube...' : 'Filter local list...',
                   border: InputBorder.none,
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      Icons.public,
+                      color: _isGlobalSearch ? Colors.redAccent : null,
+                    ),
+                    tooltip: 'Search on YouTube',
+                    onPressed: () {
+                      setState(() {
+                        _isGlobalSearch = !_isGlobalSearch;
+                        if (_isGlobalSearch) {
+                          _searchGlobal(_searchController.text);
+                        } else {
+                          _search(_searchController.text);
+                        }
+                      });
+                    },
+                  ),
                 ),
               )
             : const Text('Youtube Random Player'),
@@ -516,6 +660,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                 _isSearchExpanded = !_isSearchExpanded;
                 if (!_isSearchExpanded) {
                   _searchController.clear();
+                  _isGlobalSearch = false;
                   _search(''); // Reset search
                 }
               });
@@ -572,48 +717,70 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
               // Playlist list — takes all available space
               Expanded(
-                child: _visibleVideos.isEmpty
-                    ? const Center(child: Text('Playlist not loaded yet'))
-                    : ListView.builder(
-                        controller: _scrollController,
-                        itemExtent: 85.0, // Critical for performance with large lists (2000+)
-                        itemCount: _visibleVideos.length,
-                        itemBuilder: (BuildContext context, int index) {
-                          final item = _visibleVideos[index];
-                          final selected = _currentIndex == index;
+                child: _isGlobalSearch
+                  ? (_isGlobalSearching 
+                      ? const Center(child: CircularProgressIndicator())
+                      : _globalSearchResults.isEmpty
+                        ? const Center(child: Text('No results on YouTube'))
+                        : ListView.builder(
+                            itemCount: _globalSearchResults.length,
+                            itemBuilder: (context, index) {
+                              final item = _globalSearchResults[index];
+                              return Card(
+                                child: ListTile(
+                                  onTap: () => _playPreview(item),
+                                  leading: Image.network(item.thumbnailUrl, width: 56, fit: BoxFit.cover),
+                                  title: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+                                  trailing: IconButton(
+                                    icon: const Icon(Icons.add_circle_outline, color: Colors.redAccent),
+                                    onPressed: () => _onAddToYouTube(item),
+                                  ),
+                                ),
+                              );
+                            },
+                          ))
+                  : (_visibleVideos.isEmpty
+                      ? const Center(child: Text('Playlist not loaded yet'))
+                      : ListView.builder(
+                          controller: _scrollController,
+                          itemExtent: 85.0, // Critical for performance with large lists (2000+)
+                          itemCount: _visibleVideos.length,
+                          itemBuilder: (BuildContext context, int index) {
+                            final item = _visibleVideos[index];
+                            final selected = _currentIndex == index;
 
-                          return Card(
-                            color: selected
-                                ? Theme.of(context).colorScheme.primaryContainer
-                                : null,
-                            child: ListTile(
-                              onTap: () => _playAt(index),
-                              leading: item.thumbnailUrl.isEmpty
-                                  ? const SizedBox(
-                                      width: 56,
-                                      child: Icon(Icons.music_note),
-                                    )
-                                  : Image.network(
-                                      item.thumbnailUrl,
-                                      width: 56,
-                                      fit: BoxFit.cover,
-                                    ),
-                              title: Text(
-                                item.title,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              subtitle: Text('No. ${item.position + 1}'),
-                              trailing: selected
-                                  ? Icon(Icons.equalizer,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .onPrimaryContainer)
+                            return Card(
+                              color: selected
+                                  ? Theme.of(context).colorScheme.primaryContainer
                                   : null,
-                            ),
-                          );
-                        },
-                      ),
+                              child: ListTile(
+                                onTap: () => _playAt(index),
+                                leading: item.thumbnailUrl.isEmpty
+                                    ? const SizedBox(
+                                        width: 56,
+                                        child: Icon(Icons.music_note),
+                                      )
+                                    : Image.network(
+                                        item.thumbnailUrl,
+                                        width: 56,
+                                        fit: BoxFit.cover,
+                                      ),
+                                title: Text(
+                                  item.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text('No. ${item.position + 1}'),
+                                trailing: selected
+                                    ? Icon(Icons.equalizer,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onPrimaryContainer)
+                                    : null,
+                              ),
+                            );
+                          },
+                        )),
               ),
 
               // Compact mini-player at the bottom
