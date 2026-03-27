@@ -50,12 +50,14 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   final LocalStorageService _localStorage = LocalStorageService();
 
   final List<PlaylistVideo> _allVideos = <PlaylistVideo>[];
+  final List<PlaylistVideo> _playbackQueue = <PlaylistVideo>[];
   final List<PlaylistVideo> _visibleVideos = <PlaylistVideo>[];
 
   List<String> _savedPlaylists = [];
   List<Map<String, dynamic>> _myYtPlaylists = [];
 
   int _currentIndex = -1;
+  PlaylistVideo? _playingVideo;
   bool _isLoadingPlaylist = false;
   bool _isShuffleMode = false;
   bool _isSearchExpanded = false;
@@ -86,16 +88,22 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     _audioPlayer.player.currentIndexStream.listen((index) {
       if (index == 1 && mounted) {
         // Advanced natively to the pre-queued track!
-        final nextIndex = (_currentIndex + 1) % _visibleVideos.length;
-        setState(() => _currentIndex = nextIndex);
-        
-        _audioPlayer.shiftQueue().then((_) {
-          // Enqueue the next-next one
-          if (_visibleVideos.isNotEmpty) {
-            final newNextIndex = (_currentIndex + 1) % _visibleVideos.length;
-            _audioPlayer.enqueueNext(_visibleVideos[newNextIndex]);
-          }
-        });
+        // The real next track is based on _playbackQueue!
+        if (_playingVideo != null && _playbackQueue.isNotEmpty) {
+           final oldQIndex = _playbackQueue.indexOf(_playingVideo!);
+           final currentQIndex = (oldQIndex + 1) % _playbackQueue.length;
+           final newPlaying = _playbackQueue[currentQIndex];
+           
+           setState(() {
+             _playingVideo = newPlaying;
+             _currentIndex = _visibleVideos.indexOf(newPlaying);
+           });
+           
+           _audioPlayer.shiftQueue().then((_) {
+             final nextNextQIndex = (currentQIndex + 1) % _playbackQueue.length;
+             _audioPlayer.enqueueNext(_playbackQueue[nextNextQIndex]);
+           });
+        }
       }
     });
     _audioPlayer.player.playerStateStream.listen((state) {
@@ -124,6 +132,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       if (videos.isNotEmpty) {
         setState(() {
           _allVideos.addAll(videos);
+          _playbackQueue.addAll(videos);
           _visibleVideos.addAll(videos);
           _playlistTitle = title;
           _currentIndex = 0;
@@ -228,6 +237,9 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       _allVideos
         ..clear()
         ..addAll(videos);
+      _playbackQueue
+        ..clear()
+        ..addAll(videos);
       _visibleVideos
         ..clear()
         ..addAll(videos);
@@ -244,15 +256,24 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
   void _playAt(int index) {
     if (index < 0 || index >= _visibleVideos.length) return;
+    final video = _visibleVideos[index];
+    _playVideoObject(video);
+  }
+
+  void _playVideoObject(PlaylistVideo video) {
     if (_isChangingTrack) return;
     _isChangingTrack = true;
-    setState(() => _currentIndex = index);
-    _audioPlayer.playVideoAsCurrent(_visibleVideos[index]).then((_) {
+    setState(() {
+      _playingVideo = video;
+      _currentIndex = _visibleVideos.indexOf(video);
+    });
+    _audioPlayer.playVideoAsCurrent(video).then((_) {
       _isChangingTrack = false;
-      // Pre-queue the NEXT track for gapless background playback
-      if (_visibleVideos.isNotEmpty) {
-        final nextIndex = (index + 1) % _visibleVideos.length;
-        _audioPlayer.enqueueNext(_visibleVideos[nextIndex]);
+      // Pre-queue the NEXT track for gapless background playback based on _playbackQueue
+      if (_playbackQueue.isNotEmpty) {
+        final qIndex = _playbackQueue.indexOf(video);
+        final nextIndex = (qIndex + 1) % _playbackQueue.length;
+        _audioPlayer.enqueueNext(_playbackQueue[nextIndex]);
       }
     }).catchError((e) {
       _isChangingTrack = false;
@@ -282,35 +303,64 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   }
 
   void _playNext() {
-    if (_visibleVideos.isEmpty) return;
-    var nextIndex = _currentIndex + 1;
-    if (nextIndex >= _visibleVideos.length) nextIndex = 0;
-    _playAt(nextIndex);
+    if (_playbackQueue.isEmpty) return;
+    int currentQIndex = -1;
+    if (_playingVideo != null) {
+      currentQIndex = _playbackQueue.indexOf(_playingVideo!);
+    }
+    int next = (currentQIndex + 1) % _playbackQueue.length;
+    _playVideoObject(_playbackQueue[next]);
   }
 
   void _playPrevious() {
-    if (_visibleVideos.isEmpty) return;
-    var previousIndex = _currentIndex - 1;
-    if (previousIndex < 0) previousIndex = _visibleVideos.length - 1;
-    _playAt(previousIndex);
+    if (_playbackQueue.isEmpty) return;
+    int currentQIndex = -1;
+    if (_playingVideo != null) {
+      currentQIndex = _playbackQueue.indexOf(_playingVideo!);
+    }
+    int prev = (currentQIndex - 1) < 0 ? _playbackQueue.length - 1 : currentQIndex - 1;
+    _playVideoObject(_playbackQueue[prev]);
   }
 
   void _toggleShuffle() {
     if (_allVideos.isEmpty) return;
     setState(() {
       _isShuffleMode = !_isShuffleMode;
-      _visibleVideos.clear();
-      _visibleVideos.addAll(_allVideos);
+      _playbackQueue.clear();
+      _playbackQueue.addAll(_allVideos);
+      
       if (_isShuffleMode) {
-        _visibleVideos.shuffle(Random());
+        _playbackQueue.shuffle(Random());
       }
-      _currentIndex = 0;
+      
+      // Shuffle mode changes what plays NEXT, but visible videos remain filtered as user sees them
+      // Unless they aren't searching, then we can shuffle visible too:
+      if (_searchController.text.trim().isEmpty) {
+         _visibleVideos.clear();
+         _visibleVideos.addAll(_playbackQueue);
+      }
+      
+      if (_playingVideo != null) {
+         _currentIndex = _visibleVideos.indexOf(_playingVideo!);
+      } else {
+         _currentIndex = 0;
+      }
     });
-    _playAt(0);
+
+    // Seamlessly apply new queue routing
+    if (_playingVideo == null && _visibleVideos.isNotEmpty) {
+      _playAt(0);
+    } else if (_playingVideo != null && _playbackQueue.isNotEmpty) {
+      // Re-enqueue the new track 1 of the shuffled queue gaplessly
+      final qIndex = _playbackQueue.indexOf(_playingVideo!);
+      final nextIndex = (qIndex + 1) % _playbackQueue.length;
+      _audioPlayer.enqueueNext(_playbackQueue[nextIndex]);
+    }
   }
 
   void _search(String keyword) {
     final normalized = keyword.trim().toLowerCase();
+
     setState(() {
       if (normalized.isEmpty) {
         _visibleVideos
@@ -325,20 +375,25 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
             ),
           );
       }
-      if (_visibleVideos.isEmpty) {
-        _currentIndex = -1;
-      } else if (_currentIndex >= _visibleVideos.length || _currentIndex < 0) {
-        _currentIndex = 0;
+      
+      // Update _currentIndex to track the globally playing video in the new list
+      if (_playingVideo != null) {
+        _currentIndex = _visibleVideos.indexOf(_playingVideo!);
+      } else {
+        if (_visibleVideos.isEmpty) {
+          _currentIndex = -1;
+        } else if (_currentIndex >= _visibleVideos.length || _currentIndex < 0) {
+          _currentIndex = 0;
+        }
       }
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final PlaylistVideo? currentVideo =
-        _currentIndex >= 0 && _currentIndex < _visibleVideos.length
-            ? _visibleVideos[_currentIndex]
-            : null;
+    // Determine which video to show in the Mini-Player.
+    // It should be the globally playing video, regardless of search filters!
+    final PlaylistVideo? currentVideo = _playingVideo;
 
     if (!_isInit) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
