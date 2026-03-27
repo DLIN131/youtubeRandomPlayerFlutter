@@ -63,6 +63,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
   bool _isPlaying = false;
   bool _isInit = false;
+  bool _isChangingTrack = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
 
@@ -81,8 +82,24 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     _audioPlayer.player.durationStream.listen((dur) {
       if (mounted) setState(() => _duration = dur ?? Duration.zero);
     });
+    _audioPlayer.player.currentIndexStream.listen((index) {
+      if (index == 1 && mounted) {
+        // Advanced natively to the pre-queued track!
+        final nextIndex = (_currentIndex + 1) % _visibleVideos.length;
+        setState(() => _currentIndex = nextIndex);
+        
+        _audioPlayer.shiftQueue().then((_) {
+          // Enqueue the next-next one
+          if (_visibleVideos.isNotEmpty) {
+            final newNextIndex = (_currentIndex + 1) % _visibleVideos.length;
+            _audioPlayer.enqueueNext(_visibleVideos[newNextIndex]);
+          }
+        });
+      }
+    });
     _audioPlayer.player.playerStateStream.listen((state) {
-      if (state.processingState == ProcessingState.completed) {
+      if (state.processingState == ProcessingState.completed &&
+          !_isChangingTrack) {
         _playNext();
       }
     });
@@ -221,13 +238,23 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
     _localStorage.saveCurrentPlaylist(videos, title);
 
-    _playCurrent();
+    _playAt(0);
   }
 
-  void _playCurrent() {
-    if (_currentIndex < 0 || _currentIndex >= _visibleVideos.length) return;
-    final current = _visibleVideos[_currentIndex];
-    _audioPlayer.playVideo(current).catchError((e) {
+  void _playAt(int index) {
+    if (index < 0 || index >= _visibleVideos.length) return;
+    if (_isChangingTrack) return;
+    _isChangingTrack = true;
+    setState(() => _currentIndex = index);
+    _audioPlayer.playVideoAsCurrent(_visibleVideos[index]).then((_) {
+      _isChangingTrack = false;
+      // Pre-queue the NEXT track for gapless background playback
+      if (_visibleVideos.isNotEmpty) {
+        final nextIndex = (index + 1) % _visibleVideos.length;
+        _audioPlayer.enqueueNext(_visibleVideos[nextIndex]);
+      }
+    }).catchError((e) {
+      _isChangingTrack = false;
       if (!mounted) return;
 
       if (e is RateLimitedPlaybackException) {
@@ -249,15 +276,8 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Error playing audio: $e')));
-      // Auto skip on regular source errors
       Future.delayed(const Duration(seconds: 2), _playNext);
     });
-  }
-
-  void _playAt(int index) {
-    if (index < 0 || index >= _visibleVideos.length) return;
-    setState(() => _currentIndex = index);
-    _playCurrent();
   }
 
   void _playNext() {
@@ -285,7 +305,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       }
       _currentIndex = 0;
     });
-    _playCurrent();
+    _playAt(0);
   }
 
   void _search(String keyword) {

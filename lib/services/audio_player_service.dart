@@ -7,20 +7,31 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import '../models/playlist_video.dart';
 
 class AudioPlayerService {
-  AudioPlayerService();
 
   static const String _fallbackAudioBaseUrl =
       'https://ytdl-server-byvu.onrender.com/download';
   static const bool _enableBackendFallback = true;
-  static const Duration _setSourceTimeout = Duration(seconds: 15);
   static const Duration _rateLimitCooldown = Duration(minutes: 20);
 
   final AudioPlayer player = AudioPlayer();
+  ConcatenatingAudioSource? _activePlaylist;
+  
   final YoutubeExplode _yt = YoutubeExplode();
-
   DateTime? _rateLimitedUntil;
+  int _fetchSessionId = 0;
 
-  Future<void> playVideo(PlaylistVideo video) async {
+  MediaItem _createMediaItem(PlaylistVideo video) {
+    return MediaItem(
+      id: video.videoId,
+      title: video.title,
+      artist: 'YouTube Playlist',
+      artUri: video.thumbnailUrl.isEmpty ? null : Uri.tryParse(video.thumbnailUrl),
+    );
+  }
+
+  Future<void> playVideoAsCurrent(PlaylistVideo video) async {
+    _fetchSessionId++; // Cancel any pending prefetch
+
     if (kIsWeb) {
       throw UnsupportedError('Web playback blocked by CORS.');
     }
@@ -31,51 +42,57 @@ class AudioPlayerService {
           limitedUntil.difference(DateTime.now()));
     }
 
-    final mediaItem = MediaItem(
-      id: video.videoId,
-      title: video.title,
-      artist: 'YouTube Playlist',
-      artUri:
-          video.thumbnailUrl.isEmpty ? null : Uri.tryParse(video.thumbnailUrl),
+    final url = await _resolveStreamUrl(video);
+    if (url == null) {
+      throw Exception('Unable to extract playable stream for ${video.videoId}.');
+    }
+
+    _activePlaylist = ConcatenatingAudioSource(
+      useLazyPreparation: false,
+      children: [
+        AudioSource.uri(Uri.parse(url), tag: _createMediaItem(video)),
+      ],
     );
 
-    final playedDirectly = await _tryPlayDirect(video, mediaItem);
-    if (playedDirectly) {
-      return;
+    await player.stop();
+    await player.setAudioSource(_activePlaylist!);
+    player.play(); // DO NOT AWAIT to unblock the caller
+  }
+
+  Future<void> enqueueNext(PlaylistVideo video) async {
+    final sessionId = ++_fetchSessionId;
+    
+    final url = await _resolveStreamUrl(video);
+    // If the session changed (user skipped while we were fetching), discard this prefetch
+    if (url == null || _fetchSessionId != sessionId || _activePlaylist == null) return;
+
+    // We only keep the currently playing item and 1 pre-queued item.
+    if (_activePlaylist!.length > 1) {
+      await _activePlaylist!.removeRange(1, _activePlaylist!.length);
     }
+    await _activePlaylist!.add(AudioSource.uri(
+      Uri.parse(url),
+      tag: _createMediaItem(video),
+    ));
+    debugPrint('Native background prefetch complete for ${video.videoId}');
+  }
 
-    if (_enableBackendFallback) {
-      debugPrint(
-          'Direct audio playback failed for ${video.videoId}, trying backend fallback.');
-      final playedByBackend = await _tryPlayBackend(video, mediaItem);
-      if (playedByBackend) {
-        return;
-      }
-
-      throw Exception(
-          'Unable to play this video audio right now (both direct and backend failed).');
+  Future<void> shiftQueue() async {
+    if (_activePlaylist != null && _activePlaylist!.length > 1) {
+      // Removing index 0 natively drops it and shifts currentIndex from 1 down to 0 seamlessly
+      await _activePlaylist!.removeAt(0);
     }
-
-    throw Exception(
-        'Unable to play this video audio right now (direct source failed).');
   }
 
   Future<void> pause() => player.pause();
-
   Future<void> resume() => player.play();
-
+  
   Future<void> seekBy(Duration offset) async {
     final current = player.position;
     var nextPosition = current + offset;
-    if (nextPosition < Duration.zero) {
-      nextPosition = Duration.zero;
-    }
-
+    if (nextPosition < Duration.zero) nextPosition = Duration.zero;
     final duration = player.duration;
-    if (duration != null && nextPosition > duration) {
-      nextPosition = duration;
-    }
-
+    if (duration != null && nextPosition > duration) nextPosition = duration;
     await player.seek(nextPosition);
   }
 
@@ -86,10 +103,7 @@ class AudioPlayerService {
     await player.dispose();
   }
 
-  Future<bool> _tryPlayDirect(PlaylistVideo video, MediaItem mediaItem) async {
-    // These clients return pre-signed stream URLs that can be played
-    // without special cookies/tokens - unlike the default web client.
-    // tv and androidVr are the most reliable for direct playback.
+  Future<String?> _resolveStreamUrl(PlaylistVideo video) async {
     final clientsToTry = <YoutubeApiClient>[
       YoutubeApiClient.tv,
       YoutubeApiClient.androidVr,
@@ -106,62 +120,26 @@ class AudioPlayerService {
           ..sort((a, b) =>
               b.bitrate.bitsPerSecond.compareTo(a.bitrate.bitsPerSecond));
 
-        if (audioStreams.isEmpty) continue;
-
-        final stream = audioStreams.first;
-        final url = stream.url.toString();
-
-        await _setAndPlaySource(url: url, tag: mediaItem);
-        debugPrint(
-          'Direct playback succeeded for ${video.videoId} '
-          'using client ${client.runtimeType} '
-          '(itag=${stream.tag}, bitrate=${stream.bitrate.bitsPerSecond}).',
-        );
-        return true;
-      } on RequestLimitExceededException catch (e) {
+        if (audioStreams.isNotEmpty) {
+          final stream = audioStreams.first;
+          debugPrint('Resolved stream using ${client.runtimeType} for ${video.videoId}');
+          return stream.url.toString();
+        }
+      } on RequestLimitExceededException {
         _rateLimitedUntil = DateTime.now().add(_rateLimitCooldown);
-        debugPrint(
-          'Rate-limited by YouTube for ${video.videoId}: $e. '
-          'Cooldown until $_rateLimitedUntil',
-        );
+        debugPrint('Rate-limited by YouTube for ${video.videoId}. Cooldown until $_rateLimitedUntil');
         throw RateLimitedPlaybackException(_rateLimitCooldown);
       } catch (e) {
-        debugPrint(
-            'Client ${client.runtimeType} failed for ${video.videoId}: $e');
+        debugPrint('Client ${client.runtimeType} failed for ${video.videoId}: $e');
       }
     }
 
-    debugPrint('All direct clients failed for ${video.videoId}.');
-    return false;
-  }
-
-  Future<bool> _tryPlayBackend(PlaylistVideo video, MediaItem mediaItem) async {
-    final url = '$_fallbackAudioBaseUrl/${video.videoId}';
-    // Skip probe; just attempt to play. The _setSourceTimeout will catch failures.
-    try {
-      await _setAndPlaySource(url: url, tag: mediaItem);
-      debugPrint('Backend playback succeeded for ${video.videoId}.');
-      return true;
-    } catch (e) {
-      debugPrint('Backend playback failed for ${video.videoId}: $e');
-      return false;
+    if (_enableBackendFallback) {
+      debugPrint('Fallback to backend URI for ${video.videoId}');
+      return '$_fallbackAudioBaseUrl/${video.videoId}';
     }
-  }
 
-  Future<void> _setAndPlaySource({
-    required String url,
-    required MediaItem tag,
-    Map<String, String>? headers,
-  }) async {
-    await player.stop();
-
-    final source = AudioSource.uri(
-      Uri.parse(url),
-      tag: tag,
-      headers: headers,
-    );
-    await player.setAudioSource(source).timeout(_setSourceTimeout);
-    await player.play();
+    return null;
   }
 }
 
