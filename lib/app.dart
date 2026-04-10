@@ -115,6 +115,16 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
         _playNext();
       }
     });
+    _audioPlayer.player.playbackEventStream.listen((event) {}, onError: (Object e, StackTrace stackTrace) {
+      if (mounted) {
+         ScaffoldMessenger.of(context).showSnackBar(
+           SnackBar(content: Text('Playback error: $e. Skipping to next...')),
+         );
+      }
+      if (!_isChangingTrack) {
+         Future.delayed(const Duration(seconds: 2), _playNext);
+      }
+    });
   }
 
   Future<void> _initAuth() async {
