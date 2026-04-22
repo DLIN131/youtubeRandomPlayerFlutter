@@ -72,6 +72,34 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   bool _isChangingTrack = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+  
+  DateTime? _lastAutoSkipAt;
+  int _consecutiveErrorCount = 0;
+
+  void _triggerAutoSkip() {
+    final now = DateTime.now();
+    if (_lastAutoSkipAt != null &&
+        now.difference(_lastAutoSkipAt!) < const Duration(seconds: 3)) {
+      return; // debounced
+    }
+    _lastAutoSkipAt = now;
+    _consecutiveErrorCount++;
+
+    if (_consecutiveErrorCount > 5) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('連續多首播放失敗，自動跳過已暫停。請檢查網路或稍後再試。'),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+      return;
+    }
+
+    _playNext();
+  }
 
   @override
   void initState() {
@@ -112,7 +140,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     _audioPlayer.player.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed &&
           !_isChangingTrack) {
-        _playNext();
+        _triggerAutoSkip();
       }
     });
     _audioPlayer.player.playbackEventStream.listen((event) {}, onError: (Object e, StackTrace stackTrace) {
@@ -122,7 +150,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
          );
       }
       if (!_isChangingTrack) {
-         Future.delayed(const Duration(seconds: 2), _playNext);
+         _triggerAutoSkip();
       }
     });
   }
@@ -328,6 +356,15 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     if (_isChangingTrack) return;
     _isChangingTrack = true;
     
+    // Safety timeout to prevent flag from getting permanently stuck
+    Future.delayed(const Duration(seconds: 5), () {
+      if (_isChangingTrack && mounted) {
+        setState(() {
+          _isChangingTrack = false;
+        });
+      }
+    });
+    
     // If the video being played is NOT in the current filtered view (search result),
     // we should automatically clear the search so the playlist can jump to its real position.
     if (!_visibleVideos.contains(video)) {
@@ -349,6 +386,8 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
     _audioPlayer.playVideoAsCurrent(video).then((_) {
       _isChangingTrack = false;
+      _consecutiveErrorCount = 0; // Reset counter on successful playback
+
       // Pre-queue the NEXT track for gapless background playback based on _playbackQueue
       if (_playbackQueue.isNotEmpty) {
         final qIndex = _playbackQueue.indexOf(video);
@@ -380,7 +419,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Error playing audio: $e')));
-      Future.delayed(const Duration(seconds: 2), _playNext);
+      _triggerAutoSkip();
     });
   }
 

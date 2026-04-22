@@ -55,6 +55,11 @@ class AudioPlayerService {
       ],
     );
 
+    // Stop player before setting new source to clear any residual error states
+    try {
+      await player.stop();
+    } catch (_) {}
+
     // player.setAudioSource replaces active media natively and instantly 
     // without the overhead of an explicit stop() via method channels.
     await player.setAudioSource(_activePlaylist!);
