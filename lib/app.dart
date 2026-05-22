@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -73,30 +74,49 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   
+  String? _lastSkippedVideoId;
   DateTime? _lastAutoSkipAt;
-  int _consecutiveErrorCount = 0;
+  Timer? _playbackWatchdogTimer;
 
-  void _triggerAutoSkip() {
-    final now = DateTime.now();
-    if (_lastAutoSkipAt != null &&
-        now.difference(_lastAutoSkipAt!) < const Duration(seconds: 3)) {
-      return; // debounced
-    }
-    _lastAutoSkipAt = now;
-    _consecutiveErrorCount++;
-
-    if (_consecutiveErrorCount > 5) {
+  void _startPlaybackWatchdog(PlaylistVideo video) {
+    _playbackWatchdogTimer?.cancel();
+    _playbackWatchdogTimer = Timer(const Duration(seconds: 12), () {
+      debugPrint('Playback watchdog fired for ${video.title} (videoId: ${video.videoId})');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('連續多首播放失敗，自動跳過已暫停。請檢查網路或稍後再試。'),
-            duration: Duration(seconds: 5),
-            backgroundColor: Colors.redAccent,
+          SnackBar(
+            content: Text('「${video.title}」載入超時，自動跳過...'),
+            duration: const Duration(seconds: 3),
           ),
         );
       }
-      return;
+      _triggerAutoSkip();
+    });
+  }
+
+  void _cancelPlaybackWatchdog() {
+    if (_playbackWatchdogTimer != null) {
+      debugPrint('Cancelling watchdog timer');
+      _playbackWatchdogTimer?.cancel();
+      _playbackWatchdogTimer = null;
     }
+  }
+
+  void _triggerAutoSkip() {
+    _cancelPlaybackWatchdog();
+    final now = DateTime.now();
+    final currentId = _playingVideo?.videoId;
+
+    if (currentId != null && currentId == _lastSkippedVideoId) {
+      if (_lastAutoSkipAt != null &&
+          now.difference(_lastAutoSkipAt!) < const Duration(seconds: 2)) {
+        debugPrint('Debounced duplicate error skip for videoId: $currentId');
+        return; // debounced duplicate error event for the same song
+      }
+    }
+
+    _lastSkippedVideoId = currentId;
+    _lastAutoSkipAt = now;
 
     _playNext();
   }
@@ -109,15 +129,21 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     _loadLocalPlaylist();
     _audioPlayer.player.playingStream.listen((playing) {
       if (mounted) setState(() => _isPlaying = playing);
+      if (!playing) {
+        _cancelPlaybackWatchdog();
+      }
     });
     _audioPlayer.player.positionStream.listen((pos) {
       if (mounted) setState(() => _position = pos);
+      if (pos > Duration.zero) {
+        _cancelPlaybackWatchdog();
+      }
     });
     _audioPlayer.player.durationStream.listen((dur) {
       if (mounted) setState(() => _duration = dur ?? Duration.zero);
     });
     _audioPlayer.player.currentIndexStream.listen((index) {
-      if (index == 1 && mounted) {
+      if (index == 1) {
         // Advanced natively to the pre-queued track!
         // The real next track is based on _playbackQueue!
         if (_playingVideo != null && _playbackQueue.isNotEmpty) {
@@ -125,10 +151,17 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
            final currentQIndex = (oldQIndex + 1) % _playbackQueue.length;
            final newPlaying = _playbackQueue[currentQIndex];
            
-           setState(() {
+           _startPlaybackWatchdog(newPlaying);
+           
+           if (mounted) {
+             setState(() {
+               _playingVideo = newPlaying;
+               _currentIndex = _visibleVideos.indexOf(newPlaying);
+             });
+           } else {
              _playingVideo = newPlaying;
              _currentIndex = _visibleVideos.indexOf(newPlaying);
-           });
+           }
            
            _audioPlayer.shiftQueue().then((_) {
              final nextNextQIndex = (currentQIndex + 1) % _playbackQueue.length;
@@ -138,12 +171,22 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       }
     });
     _audioPlayer.player.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.ready ||
+          state.processingState == ProcessingState.completed) {
+        _cancelPlaybackWatchdog();
+      }
       if (state.processingState == ProcessingState.completed &&
           !_isChangingTrack) {
         _triggerAutoSkip();
       }
     });
-    _audioPlayer.player.playbackEventStream.listen((event) {}, onError: (Object e, StackTrace stackTrace) {
+    _audioPlayer.player.playbackEventStream.listen((event) {
+      if (event.processingState == ProcessingState.ready ||
+          event.processingState == ProcessingState.completed) {
+        _cancelPlaybackWatchdog();
+      }
+    }, onError: (Object e, StackTrace stackTrace) {
+      _cancelPlaybackWatchdog();
       if (mounted) {
          ScaffoldMessenger.of(context).showSnackBar(
            SnackBar(content: Text('Playback error: $e. Skipping to next...')),
@@ -201,6 +244,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
   @override
   void dispose() {
+    _cancelPlaybackWatchdog();
     WidgetsBinding.instance.removeObserver(this);
     _playlistInputController.dispose();
     _searchController.dispose();
@@ -356,12 +400,18 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     if (_isChangingTrack) return;
     _isChangingTrack = true;
     
+    _startPlaybackWatchdog(video);
+
     // Safety timeout to prevent flag from getting permanently stuck
-    Future.delayed(const Duration(seconds: 5), () {
-      if (_isChangingTrack && mounted) {
-        setState(() {
+    Future.delayed(const Duration(seconds: 8), () {
+      if (_isChangingTrack) {
+        if (mounted) {
+          setState(() {
+            _isChangingTrack = false;
+          });
+        } else {
           _isChangingTrack = false;
-        });
+        }
       }
     });
     
@@ -386,7 +436,6 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
     _audioPlayer.playVideoAsCurrent(video).then((_) {
       _isChangingTrack = false;
-      _consecutiveErrorCount = 0; // Reset counter on successful playback
 
       // Pre-queue the NEXT track for gapless background playback based on _playbackQueue
       if (_playbackQueue.isNotEmpty) {
@@ -398,27 +447,30 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       }
     }).catchError((e) {
       _isChangingTrack = false;
-      if (!mounted) return;
+      _cancelPlaybackWatchdog();
 
-      if (e is RateLimitedPlaybackException) {
-        final minutes = e.retryAfter.inMinutes < 1 ? 1 : e.retryAfter.inMinutes;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('YouTube 暫時限制請求，請約 $minutes 分鐘後再試。')),
-        );
-        return;
+      if (mounted) {
+        if (e is RateLimitedPlaybackException) {
+          final minutes = e.retryAfter.inMinutes < 1 ? 1 : e.retryAfter.inMinutes;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('YouTube 暫時限制請求，請約 $minutes 分鐘後再試。')),
+          );
+          return;
+        }
+
+        final message = e.toString();
+        if (message.contains('RequestLimitExceededException') ||
+            message.contains('rate limiting')) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('YouTube 暫時限制請求，請稍後再試。')),
+          );
+          return;
+        }
+
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error playing audio: $e')));
       }
-
-      final message = e.toString();
-      if (message.contains('RequestLimitExceededException') ||
-          message.contains('rate limiting')) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('YouTube 暫時限制請求，請稍後再試。')),
-        );
-        return;
-      }
-
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Error playing audio: $e')));
+      
       _triggerAutoSkip();
     });
   }
