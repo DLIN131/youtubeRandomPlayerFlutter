@@ -7,7 +7,7 @@ import 'package:just_audio/just_audio.dart';
 import 'models/playlist_video.dart';
 import 'services/audio_player_service.dart';
 import 'services/auth_service.dart';
-import 'services/backend_api_service.dart';
+
 import 'services/local_storage_service.dart';
 import 'services/youtube_api_service.dart';
 import 'utils/playlist_parser.dart';
@@ -46,7 +46,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   final ScrollController _scrollController = ScrollController();
 
   final YoutubeApiService _youtubeApiService = YoutubeApiService();
-  final BackendApiService _backendApiService = BackendApiService();
+
   final AuthService _authService = AuthService();
   final AudioPlayerService _audioPlayer = AudioPlayerService();
   final LocalStorageService _localStorage = LocalStorageService();
@@ -55,7 +55,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   final List<PlaylistVideo> _playbackQueue = <PlaylistVideo>[];
   final List<PlaylistVideo> _visibleVideos = <PlaylistVideo>[];
 
-  List<String> _savedPlaylists = [];
+
   List<Map<String, dynamic>> _myYtPlaylists = [];
 
   int _currentIndex = -1;
@@ -80,26 +80,25 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
   void _startPlaybackWatchdog(PlaylistVideo video) {
     _playbackWatchdogTimer?.cancel();
-    _playbackWatchdogTimer = Timer(const Duration(seconds: 12), () {
+    _playbackWatchdogTimer = Timer(const Duration(seconds: 15), () {
       debugPrint('Playback watchdog fired for ${video.title} (videoId: ${video.videoId})');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('「${video.title}」載入超時，自動跳過...'),
-            duration: const Duration(seconds: 3),
+            duration: const Duration(seconds: 2),
           ),
         );
       }
+      // Force-reset the lock so the skip can proceed
+      _isChangingTrack = false;
       _triggerAutoSkip();
     });
   }
 
   void _cancelPlaybackWatchdog() {
-    if (_playbackWatchdogTimer != null) {
-      debugPrint('Cancelling watchdog timer');
-      _playbackWatchdogTimer?.cancel();
-      _playbackWatchdogTimer = null;
-    }
+    _playbackWatchdogTimer?.cancel();
+    _playbackWatchdogTimer = null;
   }
 
   void _triggerAutoSkip() {
@@ -107,17 +106,20 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     final now = DateTime.now();
     final currentId = _playingVideo?.videoId;
 
+    // Only debounce duplicate error events for the SAME song
     if (currentId != null && currentId == _lastSkippedVideoId) {
       if (_lastAutoSkipAt != null &&
           now.difference(_lastAutoSkipAt!) < const Duration(seconds: 2)) {
         debugPrint('Debounced duplicate error skip for videoId: $currentId');
-        return; // debounced duplicate error event for the same song
+        return;
       }
     }
 
     _lastSkippedVideoId = currentId;
     _lastAutoSkipAt = now;
 
+    // Force-reset the lock so _playNext -> _playVideoObject can proceed
+    _isChangingTrack = false;
     _playNext();
   }
 
@@ -129,15 +131,9 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     _loadLocalPlaylist();
     _audioPlayer.player.playingStream.listen((playing) {
       if (mounted) setState(() => _isPlaying = playing);
-      if (!playing) {
-        _cancelPlaybackWatchdog();
-      }
     });
     _audioPlayer.player.positionStream.listen((pos) {
       if (mounted) setState(() => _position = pos);
-      if (pos > Duration.zero) {
-        _cancelPlaybackWatchdog();
-      }
     });
     _audioPlayer.player.durationStream.listen((dur) {
       if (mounted) setState(() => _duration = dur ?? Duration.zero);
@@ -180,18 +176,10 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
         _triggerAutoSkip();
       }
     });
-    _audioPlayer.player.playbackEventStream.listen((event) {
-      if (event.processingState == ProcessingState.ready ||
-          event.processingState == ProcessingState.completed) {
-        _cancelPlaybackWatchdog();
-      }
-    }, onError: (Object e, StackTrace stackTrace) {
+    _audioPlayer.player.playbackEventStream.listen((_) {}, onError: (Object e, StackTrace stackTrace) {
+      debugPrint('playbackEventStream error: $e');
       _cancelPlaybackWatchdog();
-      if (mounted) {
-         ScaffoldMessenger.of(context).showSnackBar(
-           SnackBar(content: Text('Playback error: $e. Skipping to next...')),
-         );
-      }
+      // Only auto-skip if this isn't already being handled by catchError in _playVideoObject
       if (!_isChangingTrack) {
          _triggerAutoSkip();
       }
@@ -228,12 +216,6 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
 
   Future<void> _loadDrawerData() async {
     if (!_authService.isLoggedIn) return;
-
-    final userId = _authService.currentUserInfo?.userId ?? '';
-    if (userId.isNotEmpty) {
-      final saved = await _backendApiService.fetchPlaylistNames(userId);
-      setState(() => _savedPlaylists = saved);
-    }
 
     final token = _authService.oauthToken;
     if (token != null && token.isNotEmpty) {
@@ -296,33 +278,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     }
   }
 
-  Future<void> _fetchSavedPlaylist(String listname) async {
-    final userId = _authService.currentUserInfo?.userId ?? '';
-    if (userId.isEmpty) return;
 
-    setState(() {
-      _isLoadingPlaylist = true;
-    });
-
-    try {
-      final videos =
-          await _backendApiService.fetchPlaylistData(userId, listname);
-      _setPlaylistData(videos, listname);
-    } catch (e) {
-      setState(() {
-        _isLoadingPlaylist = false;
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Load failed: $e'),
-            duration: const Duration(seconds: 2),
-            backgroundColor: Colors.redAccent,
-          ),
-        );
-      }
-    }
-  }
 
   Future<void> _fetchLikedVideos() async {
     final token = _authService.oauthToken;
@@ -393,48 +349,43 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   void _playAt(int index) {
     if (index < 0 || index >= _visibleVideos.length) return;
     final video = _visibleVideos[index];
-    _playVideoObject(video);
+    _playVideoObject(video, isManual: true);
   }
 
-  void _playVideoObject(PlaylistVideo video) {
-    if (_isChangingTrack) return;
+  void _playVideoObject(PlaylistVideo video, {bool isManual = false}) {
+    // Allow manual plays to override the lock; only block duplicate auto-plays
+    if (_isChangingTrack && !isManual) return;
     _isChangingTrack = true;
     
+    _cancelPlaybackWatchdog();
     _startPlaybackWatchdog(video);
 
-    // Safety timeout to prevent flag from getting permanently stuck
-    Future.delayed(const Duration(seconds: 8), () {
-      if (_isChangingTrack) {
-        if (mounted) {
-          setState(() {
-            _isChangingTrack = false;
-          });
-        } else {
-          _isChangingTrack = false;
-        }
-      }
-    });
-    
     // If the video being played is NOT in the current filtered view (search result),
     // we should automatically clear the search so the playlist can jump to its real position.
-    if (!_visibleVideos.contains(video)) {
-      _searchController.clear();
-      _isSearchExpanded = false; // Collapse the search bar
-      _visibleVideos.clear();
-      _visibleVideos.addAll(_isShuffleMode ? _playbackQueue : _allVideos);
-    }
+    if (mounted) {
+      if (!_visibleVideos.contains(video)) {
+        _searchController.clear();
+        _isSearchExpanded = false;
+        _visibleVideos.clear();
+        _visibleVideos.addAll(_isShuffleMode ? _playbackQueue : _allVideos);
+      }
 
-    setState(() {
+      setState(() {
+        _playingVideo = video;
+        _currentIndex = _visibleVideos.indexOf(video);
+      });
+
+      if (_currentIndex != -1) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPlaying());
+      }
+    } else {
+      // Background: update state without setState
       _playingVideo = video;
       _currentIndex = _visibleVideos.indexOf(video);
-    });
-
-    // Auto-scroll whenever we manually start a new video
-    if (mounted && _currentIndex != -1) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPlaying());
     }
 
     _audioPlayer.playVideoAsCurrent(video).then((_) {
+      _cancelPlaybackWatchdog();
       _isChangingTrack = false;
 
       // Pre-queue the NEXT track for gapless background playback based on _playbackQueue
@@ -449,40 +400,41 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       _isChangingTrack = false;
       _cancelPlaybackWatchdog();
 
-      if (mounted) {
-        if (e is RateLimitedPlaybackException) {
+      debugPrint('playVideoObject catchError: $e');
+
+      if (e is RateLimitedPlaybackException) {
+        if (mounted) {
           final minutes = e.retryAfter.inMinutes < 1 ? 1 : e.retryAfter.inMinutes;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('YouTube 暫時限制請求，請約 $minutes 分鐘後再試。')),
           );
-          return;
         }
+        return;
+      }
 
-        final message = e.toString();
-        if (message.contains('RequestLimitExceededException') ||
-            message.contains('rate limiting')) {
+      final message = e.toString();
+      if (message.contains('RequestLimitExceededException') ||
+          message.contains('rate limiting')) {
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('YouTube 暫時限制請求，請稍後再試。')),
           );
-          return;
         }
-
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Error playing audio: $e')));
+        return;
       }
       
       _triggerAutoSkip();
     });
   }
 
-  void _playNext() {
+  void _playNext({bool isManual = false}) {
     if (_playbackQueue.isEmpty) return;
     int currentQIndex = -1;
     if (_playingVideo != null) {
       currentQIndex = _playbackQueue.indexOf(_playingVideo!);
     }
     int next = (currentQIndex + 1) % _playbackQueue.length;
-    _playVideoObject(_playbackQueue[next]);
+    _playVideoObject(_playbackQueue[next], isManual: isManual);
   }
 
   void _playPrevious() {
@@ -492,7 +444,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       currentQIndex = _playbackQueue.indexOf(_playingVideo!);
     }
     int prev = (currentQIndex - 1) < 0 ? _playbackQueue.length - 1 : currentQIndex - 1;
-    _playVideoObject(_playbackQueue[prev]);
+    _playVideoObject(_playbackQueue[prev], isManual: true);
   }
 
   void _toggleShuffle() {
@@ -1028,7 +980,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                   icon: const Icon(Icons.forward_10),
                 ),
                 IconButton(
-                  onPressed: _playNext,
+                  onPressed: () => _playNext(isManual: true),
                   iconSize: 28,
                   icon: const Icon(Icons.skip_next),
                 ),
@@ -1109,25 +1061,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
                 _fetchLikedVideos();
               },
             ),
-            ExpansionTile(
-              leading: const Icon(Icons.save),
-              title: const Text('Saved Playlists'),
-              children: _savedPlaylists.isEmpty
-                  ? [
-                      const ListTile(
-                          title: Text('No saved playlists',
-                              style: TextStyle(color: Colors.grey)))
-                    ]
-                  : _savedPlaylists
-                      .map((name) => ListTile(
-                            title: Text(name),
-                            onTap: () {
-                              Navigator.pop(context);
-                              _fetchSavedPlaylist(name);
-                            },
-                          ))
-                      .toList(),
-            ),
+
             ExpansionTile(
               leading: const Icon(Icons.video_library),
               title: const Text('My YT'),
@@ -1154,7 +1088,6 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
               onTap: () async {
                 await _authService.logout();
                 setState(() {
-                  _savedPlaylists.clear();
                   _myYtPlaylists.clear();
                 });
               },

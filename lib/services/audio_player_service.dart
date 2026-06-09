@@ -8,9 +8,6 @@ import '../models/playlist_video.dart';
 
 class AudioPlayerService {
 
-  static const String _fallbackAudioBaseUrl =
-      'https://ytdl-server-byvu.onrender.com/download';
-  static const bool _enableBackendFallback = true;
   static const Duration _rateLimitCooldown = Duration(minutes: 20);
 
   final AudioPlayer player = AudioPlayer();
@@ -60,8 +57,6 @@ class AudioPlayerService {
       await player.stop();
     } catch (_) {}
 
-    // player.setAudioSource replaces active media natively and instantly 
-    // without the overhead of an explicit stop() via method channels.
     await player.setAudioSource(_activePlaylist!);
     player.play(); // DO NOT AWAIT to unblock the caller
   }
@@ -164,11 +159,6 @@ class AudioPlayerService {
       } catch (e) {
         debugPrint('Client ${client.runtimeType} failed for ${video.videoId}: $e');
       }
-    }
-
-    if (_enableBackendFallback) {
-      debugPrint('Fallback to backend URI for ${video.videoId}');
-      return '$_fallbackAudioBaseUrl/${video.videoId}';
     }
 
     return null;
