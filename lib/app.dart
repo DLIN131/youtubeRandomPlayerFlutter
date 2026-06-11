@@ -77,10 +77,15 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   String? _lastSkippedVideoId;
   DateTime? _lastAutoSkipAt;
   Timer? _playbackWatchdogTimer;
+  int _consecutiveSkipFailures = 0;
+  int _playSessionId = 0;
+  Timer? _autoSkipDelayTimer;
 
   void _startPlaybackWatchdog(PlaylistVideo video) {
     _playbackWatchdogTimer?.cancel();
+    final sessionId = _playSessionId;
     _playbackWatchdogTimer = Timer(const Duration(seconds: 15), () {
+      if (_playSessionId != sessionId) return; // 已換歌，忽略
       debugPrint('Playback watchdog fired for ${video.title} (videoId: ${video.videoId})');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -101,8 +106,9 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     _playbackWatchdogTimer = null;
   }
 
-  void _triggerAutoSkip() {
+  void _triggerAutoSkip({bool isError = true}) {
     _cancelPlaybackWatchdog();
+    _autoSkipDelayTimer?.cancel();
     final now = DateTime.now();
     final currentId = _playingVideo?.videoId;
 
@@ -115,12 +121,45 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
       }
     }
 
+    if (isError) {
+      _consecutiveSkipFailures++;
+      debugPrint('Consecutive skip failures: $_consecutiveSkipFailures / ${_playbackQueue.length}');
+      // 當失敗次數 >= 清單總長度，代表所有歌都試過了，才停止
+      final queueLen = _playbackQueue.length;
+      if (queueLen > 0 && _consecutiveSkipFailures >= queueLen) {
+        _consecutiveSkipFailures = 0;
+        _isChangingTrack = false;
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('清單中所有影片皆無法播放，請確認網路或更換播放清單。'),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+    } else {
+      // 正常播完，重置失敗計數
+      _consecutiveSkipFailures = 0;
+    }
+
     _lastSkippedVideoId = currentId;
     _lastAutoSkipAt = now;
 
-    // Force-reset the lock so _playNext -> _playVideoObject can proceed
+    // Force-reset the lock
     _isChangingTrack = false;
-    _playNext();
+
+    if (isError) {
+      // 錯誤跳轉加入 1 秒延遲，避免緊密迴圈耗盡資源
+      final sessionId = _playSessionId;
+      _autoSkipDelayTimer = Timer(const Duration(seconds: 1), () {
+        if (_playSessionId != sessionId) return; // 使用者已手動換歌
+        _playNext();
+      });
+    } else {
+      _playNext();
+    }
   }
 
   @override
@@ -171,14 +210,24 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
           state.processingState == ProcessingState.completed) {
         _cancelPlaybackWatchdog();
       }
+      // 成功開始播放 → 重置連續失敗計數
+      if (state.processingState == ProcessingState.ready) {
+        _consecutiveSkipFailures = 0;
+      }
       if (state.processingState == ProcessingState.completed &&
           !_isChangingTrack) {
-        _triggerAutoSkip();
+        _triggerAutoSkip(isError: false);
       }
     });
     _audioPlayer.player.playbackEventStream.listen((_) {}, onError: (Object e, StackTrace stackTrace) {
       debugPrint('playbackEventStream error: $e');
       _cancelPlaybackWatchdog();
+      // 如果播放器正在正常播放中，這是前一首的殘餘錯誤事件，忽略
+      if (_audioPlayer.player.playing &&
+          _audioPlayer.player.processingState == ProcessingState.ready) {
+        debugPrint('Ignoring stale playback error - player is currently playing');
+        return;
+      }
       // Only auto-skip if this isn't already being handled by catchError in _playVideoObject
       if (!_isChangingTrack) {
          _triggerAutoSkip();
@@ -227,6 +276,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   @override
   void dispose() {
     _cancelPlaybackWatchdog();
+    _autoSkipDelayTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _playlistInputController.dispose();
     _searchController.dispose();
@@ -353,9 +403,17 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
   }
 
   void _playVideoObject(PlaylistVideo video, {bool isManual = false}) {
+    // 手動選曲時重置失敗計數，並取消進行中的自動跳轉
+    if (isManual) {
+      _consecutiveSkipFailures = 0;
+      _autoSkipDelayTimer?.cancel();
+    }
     // Allow manual plays to override the lock; only block duplicate auto-plays
     if (_isChangingTrack && !isManual) return;
     _isChangingTrack = true;
+    
+    // 遞增 session ID，讓舊的 callback 自動失效
+    final sessionId = ++_playSessionId;
     
     _cancelPlaybackWatchdog();
     _startPlaybackWatchdog(video);
@@ -385,6 +443,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
     }
 
     _audioPlayer.playVideoAsCurrent(video).then((_) {
+      if (_playSessionId != sessionId) return; // 已換歌，忽略舊 callback
       _cancelPlaybackWatchdog();
       _isChangingTrack = false;
 
@@ -397,6 +456,7 @@ class _PlayerHomePageState extends State<PlayerHomePage> with WidgetsBindingObse
         }
       }
     }).catchError((e) {
+      if (_playSessionId != sessionId) return; // 已換歌，忽略舊 callback
       _isChangingTrack = false;
       _cancelPlaybackWatchdog();
 
